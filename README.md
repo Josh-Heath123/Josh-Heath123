@@ -15,7 +15,7 @@
 
 ## About
 
-BSc Computer Science student at the University of Pretoria, comfortable across the full stack — from low-level systems and networking to production web apps and AI-integrated platforms. I enjoy problems that sit at the intersection of logic, data, and user experience.
+BSc Computer Science student at the University of Pretoria, comfortable across the full stack - from low-level systems and networking to production web apps and AI-integrated platforms. I enjoy problems that sit at the intersection of logic, data, and user experience.
 
 Currently open to internships and graduate opportunities.
 
