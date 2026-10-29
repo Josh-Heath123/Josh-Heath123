@@ -24,7 +24,7 @@ from fontTools.ttLib import TTFont
 FONTS = Path(__file__).parent / "fonts"
 
 
-def font_face(family: str, file: str, text: str, weight: int = 400) -> str:
+def font_face(family: str, file: str, text: str, weight: int = 400, unicode_range: str = "") -> str:
     """@font-face rule with a WOFF2 subset holding only the glyphs in text."""
     font = TTFont(FONTS / file)
     opts = subset.Options()
@@ -39,7 +39,8 @@ def font_face(family: str, file: str, text: str, weight: int = 400) -> str:
     font.flavor = "woff2"
     font.save(buf)
     data = base64.b64encode(buf.getvalue()).decode()
-    return (f"@font-face{{font-family:'{family}';font-weight:{weight};"
+    ur = f"unicode-range:{unicode_range};" if unicode_range else ""
+    return (f"@font-face{{font-family:'{family}';font-weight:{weight};{ur}"
             f"src:url(data:font/woff2;base64,{data}) format('woff2')}}")
 
 
