@@ -3,15 +3,18 @@ build_panels.py - writes every README panel except the hero.
 
     python tools/build_panels.py
 
-Each panel comes in two layouts: <name>.svg (960 wide, desktop) and
-<name>-m.svg (480 wide, picked by the README's <picture> on narrow screens so
-the text stays readable on a phone). Numbers come from tools/stats.json, made
-by gitstats.py.
+Each panel comes in two layouts: <name>.svg (960 wide) and <name>-m.svg (480
+wide), which the README's <picture> picks on narrow screens so the text stays
+readable on a phone. Numbers come from tools/stats.json, made by gitstats.py.
 
-All panels share the hero's look: ink background, bone text, one jacaranda
-accent, JetBrains Mono embedded as WOFF2 subsets. The EquityLens panels hold
-a screenshot, so the README shows them as 2x WebP exports (equitylens.svg is
-the source, kept in tools/); every other panel is pure vector SVG.
+The design language, shared with the hero:
+  - black cards, 16 px corners, one hairline border; they read as screens on
+    GitHub's dark theme and as solid black tiles on the light one
+  - white headings, grey body text, one grey for labels; no accent colour
+    except the green "open to work" dot (the jellyfish is the only colour)
+  - Geist for text, Geist Mono for labels, numbers and code, embedded as
+    WOFF2 subsets so every browser draws the same thing
+  - every card starts with the same mono overline (ABOUT, PROJECT, ...)
 """
 
 from __future__ import annotations
@@ -19,91 +22,134 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import json
-import textwrap
+from functools import lru_cache
 from pathlib import Path
 from xml.sax.saxutils import escape
+
+from fontTools.ttLib import TTFont
 
 from svg_ascii import font_face
 
 TOOLS = Path(__file__).resolve().parent
 ASSETS = TOOLS.parent / "assets"
+FONTS = TOOLS / "fonts"
 STATS = json.loads((TOOLS / "stats.json").read_text())
 PRIVATE = {"Josh-Heath123/Culprit", "Josh-Heath123/COS341_SPL"}
 
-INK, CARD, LINE = "#0c0b10", "#121019", "#2a2537"
-BONE, BODY, DUST, MUTED, JAC = "#efe8da", "#cfc8bb", "#8a83a3", "#8f889c", "#a08ae8"
-HEAT = ["#2e2940", "#5d5287", "#8a74d6", "#b9a6f5", BONE]          # commit calendar, dim -> bright
-LANG = ["#efe8da", "#c9b8f7", "#a08ae8", "#7d69c4", "#62539c", "#4b4078", "#332c4a"]
+BG, TILE, LINE, LINE2 = "#000000", "#0a0a0a", "#232323", "#2e2e2e"
+WHITE, SOFT, BODY, LABEL, MUTED = "#fafafa", "#d4d4d4", "#a1a1a1", "#8a8a8a", "#7a7a7a"
+GO = "#3ddc84"
+HEAT = ["#141414", "#3a3a3a", "#6b6b6b", "#a8a8a8", "#fafafa"]           # commit calendar, none -> most
+LANG = ["#fafafa", "#c4c4c4", "#949494", "#6e6e6e", "#4f4f4f", "#3a3a3a", "#262626"]
 
-BASE_CSS = (
-    "text{white-space:pre;font-family:'JBM',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}"
-    f".lab{{font-weight:700;fill:{JAC};letter-spacing:2px}}"
-    f".h{{font-weight:700;fill:{BONE}}}.b{{fill:{BONE}}}.t{{fill:{BODY}}}.m{{fill:{MUTED}}}"
-    f".a{{fill:{JAC}}}.d{{fill:{DUST}}}"
-)
+FACES = {  # (family, file, weight)
+    "sans": ("G", "Geist-Regular.woff2", 400),
+    "medium": ("G", "Geist-Medium.woff2", 500),
+    "semi": ("G", "Geist-SemiBold.woff2", 600),
+    "mono": ("GM", "GeistMono-Regular.woff2", 400),
+    "monom": ("GM", "GeistMono-Medium.woff2", 500),
+}
 
 
-class Svg:
-    """A panel: collects elements, and the characters it needs from the font."""
+@lru_cache(None)
+def _metrics(file):
+    f = TTFont(FONTS / file)
+    cmap, hmtx, upm = f.getBestCmap(), f["hmtx"], f["head"].unitsPerEm
+    return {cp: hmtx[g][0] / upm for cp, g in cmap.items()}
 
-    def __init__(self, w, title, panel=True, gutter=0):
-        # gutter > 0 pads the right side, < 0 the left: two cards set at 50% each
-        # then meet with a gap between them and flush outer edges.
-        self.w, self.h, self.title, self.panel, self.gutter = w, 100, title, panel, gutter
-        self.els, self.css = [], []
-        self.reg, self.bold = set(" \u00a0"), set(" \u00a0")
 
-    def text(self, x, y, s, cls, size, anchor=None, style=""):
-        bold = {"h", "lab"} & set(cls.split())
-        (self.bold if bold else self.reg).update(s)
+def width(s, face, size, ls=0.0):
+    m = _metrics(FACES[face][1])
+    return sum(m.get(ord(c), 0.6) for c in s) * size + ls * len(s)
+
+
+def wrap(s, face, size, max_w, ls=0.0):
+    lines, cur = [], ""
+    for word in s.split(" "):
+        trial = (cur + " " + word).strip()
+        if cur and width(trial, face, size, ls) > max_w:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = trial
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+class Panel:
+    """One card: collects elements, and the characters each font face must carry."""
+
+    def __init__(self, w, alt, card=True, gutter=0):
+        # gutter > 0 pads the right side, < 0 the left, so two cards set at 50%
+        # meet with a gap between them and outer edges flush with full-width cards.
+        self.w, self.h, self.alt, self.card, self.gutter = w, 100, alt, card, gutter
+        self.els = []
+        self.used = {k: set(" ") for k in FACES}
+        self.css = []
+
+    def text(self, x, y, s, face="sans", size=15, fill=BODY, anchor=None, ls=0.0, upper=False):
+        if upper:
+            s = s.upper()
+        self.used[face].update(s)
+        fam, _, wt = FACES[face]
         a = f' text-anchor="{anchor}"' if anchor else ""
-        st = f' style="{style}"' if style else ""
-        body = escape(s).replace(" ", "\u00a0")
-        self.els.append(f'<text class="{cls}" x="{x:.1f}" y="{y:.1f}" font-size="{size}"{a}{st}>{body}</text>')
+        l = f' letter-spacing="{ls}"' if ls else ""
+        cls = "m" if fam == "GM" else "s"
+        body = escape(s).replace("  ", "  ")
+        self.els.append(f'<text class="{cls}" x="{x:.1f}" y="{y:.1f}" font-size="{size}" font-weight="{wt}" '
+                        f'fill="{fill}"{a}{l}>{body}</text>')
+        return width(s, face, size, ls)
 
-    def spans(self, x, y, parts, size):
-        """One line made of (text, class) runs, laid out on the monospace grid."""
-        for s, cls in parts:
-            self.text(x, y, s, cls, size)
-            x += len(s) * size * 0.6
-
-    def para(self, x, y, s, cls, size, width, leading):
-        """Wrap s to `width` characters; returns the baseline after the last line."""
-        for line in textwrap.wrap(s, width):
-            self.text(x, y, line, cls, size)
-            y += leading
+    def para(self, x, y, s, max_w, face="sans", size=15, fill=BODY, lead=1.6):
+        for line in wrap(s, face, size, max_w):
+            self.text(x, y, line, face, size, fill)
+            y += size * lead
         return y
+
+    def overline(self, x, y, s, fill=LABEL, anchor=None):
+        return self.text(x, y, s, "mono", 11, fill, anchor, ls=1.8, upper=True)
 
     def raw(self, s):
         self.els.append(s)
 
+    def rule(self, x1, x2, y, color=LINE):
+        self.raw(f'<line x1="{x1:.1f}" y1="{y:.1f}" x2="{x2:.1f}" y2="{y:.1f}" stroke="{color}"/>')
+
+    def tile(self, x, y, w, h, r=12, fill=TILE, stroke=LINE):
+        self.raw(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" rx="{r}" fill="{fill}" stroke="{stroke}"/>')
+
+    def arrow(self, x, y, color=WHITE, s=7):
+        """A small north-east arrow, drawn as a path (no arrow glyph in the subsets)."""
+        self.raw(f'<path d="M{x:.1f} {y + s:.1f} L{x + s:.1f} {y:.1f} M{x + 1.5:.1f} {y:.1f} H{x + s:.1f} '
+                 f'V{y + s - 1.5:.1f}" fill="none" stroke="{color}" stroke-width="1.4" stroke-linecap="round" '
+                 f'stroke-linejoin="round"/>')
+
     def render(self):
-        css = font_face("JBM", "jetbrains-mono-latin-400-normal.woff2", "".join(self.reg))
-        if len(self.bold) > 2:
-            css += font_face("JBM", "jetbrains-mono-latin-700-normal.woff2", "".join(self.bold), 700)
-        greek = "".join(c for c in self.reg | self.bold if "\u0370" <= c <= "\u03ff")
-        if greek:  # λ, σ, β come from the Greek subset, chosen per character by unicode-range
-            css += font_face("JBM", "jetbrains-mono-greek-400-normal.woff2", greek, 400, "U+0370-03FF")
-        css += BASE_CSS + "".join(self.css)
-        w, h = self.w, int(self.h)
-        defs = body = ""
-        if self.panel:
-            defs = (f'<radialGradient id="g" cx="78%" cy="18%" r="85%"><stop offset="0" stop-color="#17141f"/>'
-                    f'<stop offset="1" stop-color="{INK}"/></radialGradient>'
-                    f'<pattern id="s" width="4" height="3" patternUnits="userSpaceOnUse">'
-                    f'<rect width="4" height="1" fill="#fff" opacity=".02"/></pattern>'
-                    f'<clipPath id="c"><rect width="{w}" height="{h}" rx="14"/></clipPath>')
-            body = (f'<g clip-path="url(#c)"><rect width="{w}" height="{h}" fill="url(#g)"/>{"".join(self.els)}'
-                    f'<rect width="{w}" height="{h}" fill="url(#s)"/></g>'
-                    f'<rect x=".5" y=".5" width="{w - 1}" height="{h - 1}" rx="13.5" fill="none" stroke="{LINE}"/>')
+        css = []
+        for key, (fam, file, wt) in FACES.items():
+            chars = "".join(sorted(self.used[key]))
+            if len(chars.strip()) > 0:
+                css.append(font_face(fam, file, chars, wt))
+        greek = "".join(sorted(c for c in self.used["mono"] if "\u0370" <= c <= "\u03ff"))
+        if greek:  # Geist Mono has no beta or sigma: Greek comes from JetBrains Mono, by unicode-range
+            css.append(font_face("GM", "jetbrains-mono-greek-400-normal.woff2", greek, 400, "U+0370-03FF"))
+        css.append("text{white-space:pre}.s{font-family:'G',system-ui,-apple-system,'Segoe UI',sans-serif}"
+                   ".m{font-family:'GM',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}")
+        css += self.css
+        w, h = self.w, round(self.h)
+        if self.card:
+            body = (f'<clipPath id="c"><rect width="{w}" height="{h}" rx="16"/></clipPath>'
+                    f'<g clip-path="url(#c)"><rect width="{w}" height="{h}" fill="{BG}"/>{"".join(self.els)}</g>'
+                    f'<rect x=".5" y=".5" width="{w - 1}" height="{h - 1}" rx="15.5" fill="none" stroke="{LINE}"/>')
         else:
             body = "".join(self.els)
         ow = w + abs(self.gutter)
         if self.gutter:
             body = f'<g transform="translate({max(-self.gutter, 0)} 0)">{body}</g>'
         return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {ow} {h}" width="{ow}" height="{h}" '
-                f'xml:space="preserve" role="img" aria-labelledby="t"><title id="t">{escape(self.title)}</title>'
-                f'<defs><style>{css}</style>{defs}</defs>{body}</svg>\n')
+                f'xml:space="preserve" role="img" aria-labelledby="t"><title id="t">{escape(self.alt)}</title>'
+                f'<defs><style>{"".join(css)}</style></defs>{body}</svg>\n')
 
     def save(self, name, folder=ASSETS):
         svg = self.render()
@@ -111,86 +157,367 @@ class Svg:
         print(f"{name}: {len(svg.encode()) / 1024:.0f} KiB")
 
 
-def chip(svg, x, y, label, size=13):
-    w = len(label) * size * 0.6 + 22
-    svg.raw(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{size + 13}" rx="{(size + 13) / 2:.1f}" '
-            f'fill="{CARD}" stroke="{LINE}"/>')
-    svg.text(x + 11, y + size + 3.5, label, "b", size)
-    return w
-
-
-def chips(svg, x0, y, labels, size, right):
-    """Lay chips out left to right, wrapping at `right`; returns the y below the last row."""
-    x = x0
-    for label in labels:
-        w = len(label) * size * 0.6 + 22
-        if x + w > right and x > x0:
-            x, y = x0, y + size + 22
-        x += chip(svg, x, y, label, size) + 10
-    return y + size + 13
-
-
-def arrow(x, y, color=JAC, s=7):
-    """A small north-east arrow, drawn as a path (the font subset has no arrow glyph)."""
-    return (f'<path d="M{x:.1f} {y + s:.1f} L{x + s:.1f} {y:.1f} M{x + 2:.1f} {y:.1f} H{x + s:.1f} V{y + s - 2:.1f}" '
-            f'fill="none" stroke="{color}" stroke-width="1.5" stroke-linecap="round"/>')
-
-
-def name(base, narrow):
+def fname(base, narrow):
     return f"{base}-m.svg" if narrow else f"{base}.svg"
 
 
-# ------------------------------------------------------------------- about
+def repo_stats(repo):
+    return next(r for r in STATS["repos"] if r["repo"] == repo)
 
+
+def chips(p, x0, y, labels, right, size=13):
+    """Outline pills, left to right, wrapping at `right`; returns the y below the last row."""
+    x, hh = x0, size + 15
+    for label in labels:
+        w = width(label, "sans", size) + 24
+        if x + w > right and x > x0:
+            x, y = x0, y + hh + 10
+        p.raw(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{hh}" rx="{hh / 2}" fill="{TILE}" stroke="{LINE2}"/>')
+        p.text(x + 12, y + hh / 2 + size * 0.36, label, "sans", size, SOFT)
+        x += w + 8
+    return y + hh
+
+
+# -------------------------------------------------------------------- about
+
+ABOUT_HEAD = "I build a feature end to end, then stay to keep it running."
 ABOUT = [
-    "Final-year BSc Computer Science student at the University of Pretoria, graduating at the end of "
-    "2026. I work across the full stack with a focus on data: I build the pipeline, the API and the "
-    "interface for a feature, then take it to production and look after it once real people use it.",
-    "Comfortable from low-level systems and networking up to production web apps. I care about the "
-    "unglamorous parts too: tests worked out by hand, migrations that round-trip, deploys that stay up.",
-    "Away from the keyboard: gym and gaming. I like a challenge, physical, recreational or mental.",
+    "Final-year BSc Computer Science student at the University of Pretoria. I work across the full stack with "
+    "a focus on data: I build the pipeline, the API and the interface for a feature, then take it to "
+    "production and look after it once real people use it.",
+    "Comfortable from low-level systems and networking up to production web apps. I care about the unglamorous "
+    "parts too: tests worked out by hand, migrations that round-trip, deploys that stay up.",
+    "Away from the keyboard: gym and gaming.",
 ]
+FACTS = [("Studying", "BSc Computer Science", "University of Pretoria"),
+         ("Graduating", "End of 2026", ""),
+         ("Based in", "Gauteng", "South Africa"),
+         ("Open to", "Internships and", "graduate roles")]
 
 
 def about(narrow=False):
-    s = Svg(480 if narrow else 960,
-            "NAME: josh, builds a feature end to end, then stays to keep it running. " + " ".join(ABOUT)
-            + " Open to internships and graduate roles.")
+    W = 480 if narrow else 960
+    p = Panel(W, "About. " + ABOUT_HEAD + " " + " ".join(ABOUT) + " "
+              + " ".join(f"{k}: {a} {b}." for k, a, b in FACTS))
+    m = 28 if narrow else 56
+    p.overline(m, 52 if narrow else 60, "About")
     if narrow:
-        x, size, wrap = 24, 15, 47
-        s.text(x, 44, "NAME", "lab", 11)
-        s.spans(x, 70, [("josh", "h"), (" \u2014 builds a feature end to", "t")], size)
-        s.text(x, 92, "end, then stays to keep it running", "t", size)
-        s.text(x, 132, "SYNOPSIS", "lab", 11)
-        s.spans(x, 158, [("josh ", "h"), ("[--pipeline] [--api] [--interface]", "a")], size * 0.92)
-        s.spans(x, 180, [("     --to production ", "b"), ("problem", "m")], size * 0.92)
-        s.text(x, 220, "DESCRIPTION", "lab", 11)
-        y = 246
+        y = 92
+        for line in wrap(ABOUT_HEAD, "semi", 24, W - 2 * m, -0.4):
+            p.text(m, y, line, "semi", 24, WHITE, ls=-0.4)
+            y += 31
+        y += 12
+        for para in ABOUT:
+            y = p.para(m, y, para, W - 2 * m, size=14.5) + 10
+        y += 8
     else:
-        x, size, wrap = 214, 14.5, 76
-        s.text(52, 62, "NAME", "lab", 12)
-        s.spans(x, 62, [("josh", "h"), (" \u2014 builds a feature end to end, then stays to keep it running", "t")], 15)
-        s.text(52, 106, "SYNOPSIS", "lab", 12)
-        s.spans(x, 106, [("josh ", "h"), ("[--pipeline] [--api] [--interface] ", "a"), ("--to production ", "b"),
-                         ("problem", "m")], 15)
-        s.text(52, 150, "DESCRIPTION", "lab", 12)
-        y = 150
-    for p in ABOUT:
-        y = s.para(x, y, p, "t", size, wrap, size * 1.5) + 12
-    s.raw(f'<circle cx="{x + 5}" cy="{y - 5}" r="4.5" fill="{JAC}"><animate attributeName="opacity" '
-          f'values="1;.35;1" dur="2.4s" repeatCount="indefinite"/></circle>')
-    s.text(x + 18, y, "Open to internships and graduate roles.", "b", size * (0.95 if narrow else 1))
-    s.h = y + 40
-    s.save(name("about", narrow))
+        y = 106
+        for line in wrap(ABOUT_HEAD, "semi", 30, 360, -0.6):
+            p.text(m, y, line, "semi", 30, WHITE, ls=-0.6)
+            y += 38
+        yb = 102
+        for para in ABOUT:
+            yb = p.para(456, yb, para, W - 456 - m, size=15) + 10
+        y = max(y, yb) + 12
+    p.rule(m, W - m, y)
+    y += 34
+    cols = 2 if narrow else 4
+    cw = (W - 2 * m) / cols
+    for i, (k, a, b) in enumerate(FACTS):
+        x = m + (i % cols) * cw
+        yy = y + (i // cols) * 86
+        p.overline(x, yy, k)
+        dot = 0
+        if k == "Open to":
+            p.raw(f'<circle cx="{x + 4}" cy="{yy + 22}" r="4" fill="{GO}"><animate attributeName="opacity" '
+                  f'values="1;.35;1" dur="2.4s" repeatCount="indefinite"/></circle>')
+            dot = 14
+        p.text(x + dot, yy + 27, a, "medium", 15, WHITE)
+        if b:
+            p.text(x + dot, yy + 49, b, "sans", 14, BODY)
+    p.h = y + (2 if narrow else 1) * 86 - 10
+    p.save(fname("about", narrow))
 
 
-# ----------------------------------------------------------------- history
+# --------------------------------------------------------------- EquityLens
 
-def heat_level(n):
-    return 0 if n == 0 else 1 if n <= 2 else 2 if n <= 5 else 3 if n <= 9 else 4
+EQ_FACTS = [("Client", "Amazon Web Services"), ("Team", "Four, The Big Five"), ("Live", "equitylens.co.za")]
 
 
-def history(narrow=False):
+def equitylens(narrow=False):
+    repo = repo_stats("COS301-SE-2026/Equity-Lens")
+    W = 480 if narrow else 960
+    m = 28 if narrow else 56
+    p = Panel(W, "Featured: EquityLens, our COS 301 capstone, with Amazon Web Services as industry client. See why "
+                 "your portfolio moved, not just that it did. Built by a team of four; "
+                 f"{repo['commits']} of the commits are mine. Screenshot of the dashboard plotting a portfolio "
+                 "against the Satrix 40 benchmark, with a dot on each day a holding moved unusually far.")
+    p.overline(m, 52 if narrow else 60, "Featured  ·  COS 301 capstone")
+    if narrow:
+        p.text(m, 100, "EquityLens", "semi", 34, WHITE, ls=-0.8)
+        y = p.para(m, 132, "See why your portfolio moved, not just that it did.", W - 2 * m, size=16, fill=SOFT)
+        y += 4
+        for k, v in EQ_FACTS:
+            p.text(m, y, k, "mono", 11.5, LABEL, ls=1.2, upper=True)
+            p.text(m + 82, y, v, "sans", 14, SOFT)
+            y += 24
+        p.text(m, y + 4, f"{repo['commits']} commits  ·  {repo['added']:,} lines", "mono", 12, LABEL)
+        fy = y + 28
+    else:
+        p.text(m, 116, "EquityLens", "semi", 44, WHITE, ls=-1.2)
+        p.text(m, 150, "See why your portfolio moved, not just that it did.", "sans", 18, SOFT)
+        p.text(W - m, 98, f"{repo['commits']}", "semi", 30, WHITE, anchor="end", ls=-0.5)
+        p.text(W - m, 120, "commits", "mono", 11.5, LABEL, anchor="end", ls=1.2, upper=True)
+        x = m
+        for k, v in EQ_FACTS:
+            x += p.text(x, 190, k, "mono", 11.5, LABEL, ls=1.2, upper=True) + 10
+            x += p.text(x, 190, v, "sans", 14, SOFT) + 30
+        p.text(W - m, 190, f"{repo['added']:,} lines", "mono", 12, LABEL, anchor="end")
+        fy = 216
+
+    shot = (ASSETS / "equitylens-dashboard.webp").read_bytes()
+    fw = W - 2 * m
+    ih = fw * 738 / 1360
+    bar = 28 if narrow else 36
+    p.tile(m, fy, fw, ih + bar, r=12, fill="#070707")
+    pill = 176 if narrow else 236
+    p.raw(f'<rect x="{m + fw / 2 - pill / 2:.1f}" y="{fy + bar / 2 - 10:.1f}" width="{pill}" height="20" rx="10" '
+          f'fill="{TILE}" stroke="{LINE}"/>')
+    p.text(m + fw / 2, fy + bar / 2 + 4, "equitylens.co.za" if narrow else "equitylens.co.za/dashboard",
+           "mono", 11, MUTED, anchor="middle")
+    p.raw(f'<clipPath id="shot"><rect x="{m + 1}" y="{fy + bar}" width="{fw - 2}" height="{ih - 1:.0f}" rx="11"/>'
+          f'</clipPath><image clip-path="url(#shot)" x="{m}" y="{fy + bar}" width="{fw}" height="{ih:.1f}" '
+          f'href="data:image/webp;base64,{base64.b64encode(shot).decode()}"/>')
+    cap = ("Each dot is a day one holding moved unusually far for itself. Click it for the event study and "
+           "the news around it.")
+    y = p.para(m, fy + bar + ih + 34, cap, W - 2 * m, size=13.5, fill=MUTED)
+    p.h = y + 10
+    p.save(fname("equitylens", narrow))
+
+
+# ----------------------------------------------------------------- my part
+
+PARTS = [
+    ("Dashboard", "TWR  ·  XIRR via Newton's method",
+     "The flagship page: returns against a blended benchmark, a 0–10 health score and what-if rebalancing."),
+    ("Unusual moves", "λ = 0.94  ·  |z| ≥ 3",
+     "EWMA volatility scores each day's log return against the holding's own recent volatility."),
+    ("Event study", "OLS β  ·  CAR ± 1.96σ",
+     "A market model splits each move into a market part and a company part, with a cumulative abnormal "
+     "return band."),
+    ("News pipeline", "BM25 0.5  ·  date 0.3  ·  entity 0.2",
+     "Stored once in Postgres, ranked by a hand-written BM25 index, date proximity and entity match; "
+     "refreshed nightly."),
+    ("Guest mode", "no sign-up  ·  data wiped on exit",
+     "Visitors try the whole product without an account, plus the landing page that sells it."),
+]
+CODE = [
+    [("variance", WHITE), (" = ", MUTED), ("LAMBDA", SOFT), (" * ", MUTED), ("variance", WHITE)],
+    [("  + (", MUTED), ("1", BODY), (" - ", MUTED), ("LAMBDA", SOFT), (") * ", MUTED), ("r_prev", WHITE),
+     ("**", MUTED), ("2", BODY)],
+    [("sigma", WHITE), (" = ", MUTED), ("math.sqrt", SOFT), ("(variance)", WHITE)],
+    [("z", WHITE), (" = ", MUTED), ("r", WHITE), (" / ", MUTED), ("sigma", WHITE)],
+    [("# unusual when |z| >= 3", MUTED)],
+]
+STACK_EQ = ["React", "FastAPI", "PostgreSQL 16", "Docker", "GitHub Actions", "Terraform", "AWS"]
+
+
+def mono_line(p, x, y, parts, size):
+    for s, color in parts:
+        x += p.text(x, y, s, "mono", size, color)
+
+
+def owned(narrow=False):
+    W = 480 if narrow else 960
+    m = 28 if narrow else 56
+    p = Panel(W, "EquityLens, my part: " + "; ".join(f"{t} ({g}): {d}" for t, g, d in PARTS)
+              + " Stack: " + ", ".join(STACK_EQ) + ".")
+    p.overline(m, 52 if narrow else 60, "EquityLens  ·  My part")
+    if narrow:
+        p.text(m, 92, "The parts I own", "semi", 24, WHITE, ls=-0.4)
+        y = 116
+        x = m
+        line = "  ·  ".join(STACK_EQ)
+        y = p.para(m, y, line, W - 2 * m, face="mono", size=11, fill=LABEL, lead=1.7) + 6
+        tw = W - 2 * m
+        for title, tag, desc in PARTS:
+            lines = wrap(desc, "sans", 13.5, tw - 40)
+            h = 88 + len(lines) * 21
+            p.tile(x, y, tw, h)
+            p.text(x + 20, y + 34, title, "medium", 17, WHITE)
+            p.text(x + 20, y + 56, tag, "mono", 11, LABEL)
+            for k, l in enumerate(lines):
+                p.text(x + 20, y + 84 + k * 21, l, "sans", 13.5, BODY)
+            y += h + 12
+        ch = 160
+        p.tile(x, y, tw, ch, fill="#050505")
+        p.text(x + 20, y + 32, "event_detection.py", "mono", 12, SOFT)
+        p.text(x + tw - 18, y + 32, "simplified", "mono", 10.5, MUTED, anchor="end")
+        for k, parts in enumerate(CODE):
+            mono_line(p, x + 20, y + 64 + k * 19, parts, 11.5)
+        p.h = y + ch + 28
+    else:
+        p.text(m, 106, "The parts I own", "semi", 30, WHITE, ls=-0.6)
+        p.text(W - m, 106, "  ·  ".join(STACK_EQ), "mono", 11.5, LABEL, anchor="end")
+        tw, gap, th = (W - 2 * m - 2 * 16) / 3, 16, 176
+        for i, (title, tag, desc) in enumerate(PARTS):
+            x, y = m + (i % 3) * (tw + gap), 138 + (i // 3) * (th + gap)
+            p.tile(x, y, tw, th)
+            p.text(x + 22, y + 38, title, "medium", 17, WHITE)
+            p.text(x + 22, y + 61, tag, "mono", 11, LABEL)
+            for k, l in enumerate(wrap(desc, "sans", 13.5, tw - 44)):
+                p.text(x + 22, y + 94 + k * 21, l, "sans", 13.5, BODY)
+        x, y = m + 2 * (tw + gap), 138 + th + gap
+        p.tile(x, y, tw, th, fill="#050505")
+        p.text(x + 22, y + 36, "event_detection.py", "mono", 12, SOFT)
+        p.text(x + tw - 20, y + 36, "simplified", "mono", 10.5, MUTED, anchor="end")
+        for k, parts in enumerate(CODE):
+            mono_line(p, x + 22, y + 70 + k * 20, parts, 11.5)
+        p.h = 138 + 2 * th + gap + 44
+    p.save(fname("owned", narrow))
+
+
+# ------------------------------------------------------------ project cards
+
+PROJECTS = [
+    ("card-stylecode", "StyleCode", "Josh-Heath123/StyleCode", "v0.5.0",
+     "A local-first visual UI editor where the canvas is the prompt: draw an interface, ask an AI to change "
+     "part of it, export real HTML/CSS or React. Now also a workspace for software consultants.",
+     "TypeScript  ·  React  ·  Vite  ·  Playwright"),
+    ("card-studysensei", "StudySensei", "Josh-Heath123/StudySensei", "Phase 2 of 9",
+     "Turns your own course material into a topic map you control, finds the exact page for any question, "
+     "and times study sessions that survive reloads and lost connections.",
+     "React  ·  FastAPI  ·  Postgres + pgvector"),
+    ("card-munisense", "MuniSense", "Josh-Heath123/MuniSense", "Phase 1 done",
+     "Exact, source-cited South African municipal electricity bills, for software and AI agents. The "
+     "calculation core is built: decimal money, cited tariff values and prepaid purchases.",
+     "Python 3.13  ·  Pydantic  ·  100% branch coverage"),
+    ("card-culprit", "Culprit", "Josh-Heath123/Culprit", "In progress",
+     "A multimeter for software: probes the links between components to find what is wrong, where and why, "
+     "with the evidence attached.",
+     "Go  ·  Python  ·  TypeScript"),
+]
+
+
+def project_card(file, title, repo, status, desc, tech, narrow, lines, side, tlines=1):
+    st = repo_stats(repo)
+    private = repo in PRIVATE
+    W = 240 if narrow else 470
+    m = 18 if narrow else 30
+    p = Panel(W, f"Project: {title} ({status}). {desc} {tech.replace(chr(183), ',').replace('  ', ' ')}. "
+                 f"{st['commits']} commits" + (", private repository." if private else "."),
+              gutter=side * (6 if narrow else 9))
+    if narrow:
+        p.overline(m, 34, "Project")
+        p.text(m, 62, title, "semi", 18, WHITE, ls=-0.3)
+        p.text(m, 82, status, "mono", 10.5, LABEL)
+        y = 108
+        size, lead = 12.5, 19
+    else:
+        p.overline(m, 46, "Project")
+        sw = width(status, "mono", 11) + 20
+        p.raw(f'<rect x="{W - m - sw:.1f}" y="{30}" width="{sw:.1f}" height="22" rx="11" fill="{TILE}" stroke="{LINE2}"/>')
+        p.text(W - m - sw / 2, 45, status, "mono", 11, SOFT, anchor="middle")
+        p.text(m, 88, title, "semi", 24, WHITE, ls=-0.5)
+        y = 120
+        size, lead = 14, 22
+    dl = wrap(desc, "sans", size, W - 2 * m)
+    for k, l in enumerate(dl):
+        p.text(m, y + k * lead, l, "sans", size, BODY)
+    y += max(len(dl), lines) * lead + (2 if narrow else 6)
+    if narrow:
+        tl = wrap(tech.replace("  ·  ", " · "), "mono", 10.5, W - 2 * m)
+        for k, l in enumerate(tl):
+            p.text(m, y + k * 16, l, "mono", 10.5, LABEL)
+        y += max(len(tl), tlines) * 16 + 2
+    else:
+        p.text(m, y, tech, "mono", 11.5, LABEL)
+        y += 8
+    rule = y + 6
+    p.rule(m, W - m, rule)
+    fs = 11 if narrow else 12
+    p.text(m, rule + 26, f"{st['commits']} commits", "mono", fs, MUTED)
+    if private:
+        p.text(W - m, rule + 26, "private", "mono", fs, MUTED, anchor="end")
+    else:
+        p.text(W - m - 13, rule + 26, "source", "mono", fs, SOFT, anchor="end")
+        p.arrow(W - m - 7, rule + 17.5, SOFT)
+    p.h = rule + 44
+    p.save(fname(file, narrow))
+
+
+def projects(narrow=False):
+    # the two cards in a row get the same number of description lines, so they line up
+    W, m = (240, 18) if narrow else (470, 30)
+    size = 12.5 if narrow else 14
+    for i, pr in enumerate(PROJECTS):
+        pair = PROJECTS[i - i % 2: i - i % 2 + 2]
+        lines = max(len(wrap(q[4], "sans", size, W - 2 * m)) for q in pair)
+        tlines = max(len(wrap(q[5].replace("  ·  ", " · "), "mono", 10.5, W - 2 * m)) for q in pair)
+        project_card(*pr, narrow=narrow, lines=lines, side=1 if i % 2 == 0 else -1, tlines=tlines)
+
+
+# ---------------------------------------------------------------- coursework
+
+COURSEWORK = [
+    ("row-spl", "SPL compiler", "COS 341", "Java  ·  group of four", "Josh-Heath123/COS341_SPL",
+     "A compiler for SPL, the course's teaching language, built stage by stage. I worked on the parser and the "
+     "semantic analysis."),
+    ("row-nursery", "Plant nursery simulator", "COS 214", "C++  ·  team project", "Josh-Heath123/COS214-Final_Project",
+     "A nursery simulation built to show object-oriented design patterns. I built the GUI and the Iterator "
+     "pattern."),
+    ("row-market", "Stationery marketplace", "COS 221", "PHP, JavaScript  ·  team",
+     "Josh-Heath123/COS221-Assignment5",
+     "Pulls product data from several retailers' APIs into one store. I wrote the PHP API layer and the "
+     "products page."),
+]
+
+
+def course_row(file, title, course, meta, repo, desc, narrow):
+    st = repo_stats(repo)
+    private = repo in PRIVATE
+    W = 480 if narrow else 960
+    m = 28 if narrow else 56
+    p = Panel(W, f"Coursework, {course}: {title}. {meta.replace(chr(183), ',').replace('  ', ' ')}. {desc} "
+                 f"{st['commits']} commits" + (", private repository." if private else "."))
+    if narrow:
+        p.overline(m, 40, f"Coursework  ·  {course}")
+        p.text(m, 68, title, "semi", 18, WHITE, ls=-0.3)
+        p.text(m, 90, meta.replace("  ·  ", " · "), "mono", 11, LABEL)
+        y = p.para(m, 118, desc, W - 2 * m, size=13.5) - 4
+        p.text(m, y + 10, f"{st['commits']} commits", "mono", 11, MUTED)
+        if private:
+            p.text(W - m, y + 10, "private", "mono", 11, MUTED, anchor="end")
+        else:
+            p.text(W - m - 13, y + 10, "source", "mono", 11, SOFT, anchor="end")
+            p.arrow(W - m - 7, y + 1.5, SOFT)
+        p.h = y + 34
+    else:
+        p.overline(m, 44, f"Coursework  ·  {course}")
+        p.text(m, 76, title, "semi", 20, WHITE, ls=-0.3)
+        p.text(m, 100, meta, "mono", 11.5, LABEL)
+        lines = wrap(desc, "sans", 14, 410)
+        y0 = 72 - (len(lines) - 2) * 11
+        for k, l in enumerate(lines):
+            p.text(364, y0 + k * 22, l, "sans", 14, BODY)
+        p.text(W - m, 76, f"{st['commits']} commits", "mono", 12, MUTED, anchor="end")
+        if private:
+            p.text(W - m, 100, "private", "mono", 12, MUTED, anchor="end")
+        else:
+            p.text(W - m - 13, 100, "source", "mono", 12, SOFT, anchor="end")
+            p.arrow(W - m - 7, 91.5, SOFT)
+        p.h = 128
+    p.save(fname(file, narrow))
+
+
+def coursework(narrow=False):
+    for row in COURSEWORK:
+        course_row(*row, narrow=narrow)
+
+
+# ------------------------------------------------------------------- numbers
+
+def numbers(narrow=False):
     t = STATS["totals"]
     days = {dt.date.fromisoformat(k): v for k, v in STATS["days"].items()}
     end = dt.date.fromisoformat(STATS["generated"])
@@ -199,344 +526,176 @@ def history(narrow=False):
     window = sum(v for d, v in days.items() if start <= d <= end)
     first = min(days)
     public = sum(1 for r in STATS["repos"] if r["repo"] not in PRIVATE)
+    langs = STATS["languages"]
+    total = sum(langs.values())
+    top = list(langs.items())[:6]
+    top.append(("Other", total - sum(v for _, v in top)))
+    span = f"{weeks - 1 if weeks == 53 else weeks} weeks"
 
-    s = Svg(480 if narrow else 960,
-            f"HISTORY: {t['commits']} commits and {t['added']:,} lines of code added across {t['repos']} "
-            f"repositories ({public} public, {t['repos'] - public} private) since {first:%B %Y}, counted from git "
-            f"history on {end:%d %B %Y}. {window} commits in the last {weeks - 1 if weeks == 53 else weeks} weeks.")
-    stats = [(f"{t['commits']:,}", "commits", f"every branch, since {first:%b %Y}"),
-             (f"{t['added']:,}", "lines of code added", "code files only, no lockfiles"),
-             (f"{t['repos']}", "repositories", f"{public} public, {t['repos'] - public} private")]
+    W = 480 if narrow else 960
+    m = 28 if narrow else 56
+    p = Panel(W, f"By the numbers: {t['commits']:,} commits and {t['added']:,} lines of code added across "
+                 f"{t['repos']} repositories ({public} public, {t['repos'] - public} private) since {first:%B %Y}, "
+                 f"counted from git history on {end:%d %B %Y}. {window} commits in the last {span}. Lines by "
+                 "language: " + ", ".join(f"{k} {100 * v / total:.1f}%" for k, v in top) + ".")
+    p.overline(m, 52 if narrow else 60, "By the numbers")
+    big = [(f"{t['commits']:,}", "Commits", f"Every branch, since {first:%b %Y}"),
+           (f"{t['added']:,}", "Lines of code added", "Code files only"),
+           (f"{t['repos']}", "Repositories", f"{public} public, {t['repos'] - public} private")]
     if narrow:
-        x, right = 24, 456
-        s.text(x, 44, "HISTORY", "lab", 11)
-        s.spans(x, 70, [("$ ", "m"), ("git log ", "b"), ("--author=josh --all", "a")], 13)
-        y = 124
-        for big, label, sub in stats:
-            s.text(x - 2, y, big, "h", 40)
-            s.text(x + 196, y - 18, label, "b", 14)
-            s.text(x + 196, y, sub, "m", 11.5)
+        y = 106
+        for val, label, sub in big:
+            p.text(m, y, val, "semi", 36, WHITE, ls=-1)
+            p.text(m + 200, y - 16, label, "medium", 14, WHITE)
+            p.text(m + 200, y + 2, sub, "sans", 12.5, MUTED)
             y += 58
-        gx, gy, cw = x + 34, y + 30, 15.2
+        gy, cell, gap = y + 26, 12, 3
     else:
-        x, right = 214, 908
-        s.text(52, 62, "HISTORY", "lab", 12)
-        s.spans(x, 62, [("$ ", "m"), ("git log ", "b"), ("--author=josh --all ", "a"), ("--since=", "m"),
-                        (f"{first:%Y-%m}", "m")], 14)
-        for i, (big, label, sub) in enumerate(stats):
-            cx = x + (0, 240, 520)[i]
-            s.text(cx - 3, 140, big, "h", 54)
-            s.text(cx, 168, label, "b", 14)
-            s.text(cx, 188, sub, "m", 11.5)
-        gx, gy, cw = x + 26, 246, 12.3
-    ch = 15
+        cols = [m, m + 300, m + 640]
+        for (val, label, sub), x in zip(big, cols):
+            p.text(x, 140, val, "semi", 56, WHITE, ls=-2)
+            p.text(x, 172, label, "medium", 15, WHITE)
+            p.text(x, 194, sub, "sans", 13.5, MUTED)
+        gy, cell, gap = 252, 12.2, 3.2
 
-    # Commit calendar: one glyph per day, Sunday-first columns as on GitHub.
-    glyphs = "\u00b7:=#@"
-    s.reg.update(glyphs)
-    s.css.append("".join(f".l{i}{{fill:{c}}}" for i, c in enumerate(HEAT)))
-    # Fade in week by week. The resting state is visible, so a renderer that skips
-    # CSS animation still shows every day.
-    s.css.append(".wk{animation:in .5s ease-out backwards}@keyframes in{from{opacity:0}}")
+    # commit calendar: one square per day, Sunday-first columns as on GitHub
+    gx = m + (0 if narrow else 30)
+    step = cell + gap
     prev = None
     for w in range(weeks):
         week0 = start + dt.timedelta(weeks=w)
         nxt = week0 + dt.timedelta(weeks=1)
         if week0.month != prev and w < weeks - 2 and not (w == 0 and nxt.month != week0.month):
-            s.text(gx + w * cw - 3, gy - 12, f"{week0:%b}", "m", 10.5)
+            p.text(gx + w * step, gy - 10, f"{week0:%b}", "mono", 10, MUTED)
             prev = week0.month
         cells = []
         for r in range(7):
             day = week0 + dt.timedelta(days=r)
             if day <= end:
-                lvl = heat_level(days.get(day, 0))
-                cells.append(f'<text class="l{lvl}" x="{gx + w * cw + cw / 2:.1f}" y="{gy + r * ch + 11:.1f}" '
-                             f'font-size="{13 if narrow else 12}" text-anchor="middle">{glyphs[lvl]}</text>')
-        s.raw(f'<g class="wk" style="animation-delay:{0.25 + w * 0.018:.3f}s">{"".join(cells)}</g>')
-    for r, day_name in ((1, "Mon"), (3, "Wed"), (5, "Fri")):
-        s.text(gx - 32, gy + r * ch + 11, day_name, "m", 10)
-    ly = gy + 7 * ch + 22
-    s.text(gx - 32 if narrow else gx, ly, f"{window} commits, last {weeks - 1 if weeks == 53 else weeks} weeks", "m", 11)
-    gr = gx + weeks * cw
-    s.text(gr - 5 * 15 - 40, ly, "less", "m", 11, anchor="end")
-    for i, g in enumerate(glyphs):
-        s.text(gr - (5 - i) * 15 - 28, ly, g, f"l{i}", 13, anchor="middle")
-    s.text(gr, ly, "more", "m", 11, anchor="end")
+                n = days.get(day, 0)
+                lvl = 0 if n == 0 else 1 if n <= 2 else 2 if n <= 5 else 3 if n <= 10 else 4
+                cells.append(f'<rect x="{gx + w * step:.1f}" y="{gy + r * step:.1f}" width="{cell}" height="{cell}" '
+                             f'rx="2.5" fill="{HEAT[lvl]}"/>')
+        p.raw("".join(cells))
+    if not narrow:
+        for r, d in ((1, "Mon"), (3, "Wed"), (5, "Fri")):
+            p.text(m, gy + r * step + cell - 2, d, "mono", 10, MUTED)
+    ly = gy + 7 * step + 22
+    p.text(m if narrow else gx, ly, f"{window:,} commits, last {span}" if narrow else f"{window:,} commits in the last {span}",
+           "mono", 11, MUTED)
+    gr = gx + weeks * step - gap
+    lx = gr - 5 * (cell + 4) - width("more", "mono", 11) - 8
+    p.text(lx - 8, ly, "less", "mono", 11, MUTED, anchor="end")
+    for i, c in enumerate(HEAT):
+        p.raw(f'<rect x="{lx + i * (cell + 4):.1f}" y="{ly - cell + 2:.1f}" width="{cell}" height="{cell}" rx="2.5" fill="{c}" stroke="{LINE if i == 0 else c}"/>')
+    p.text(gr, ly, "more", "mono", 11, MUTED, anchor="end")
 
-    # Lines of code by language.
-    langs = STATS["languages"]
-    total = sum(langs.values())
-    top = list(langs.items())[:6]
-    top.append(("Other", total - sum(v for _, v in top)))
-    by = ly + 44
-    if narrow:
-        s.text(x, by, "LANGUAGES", "lab", 11)
-        by += 16
-    else:
-        s.text(52, by + 9, "LANGUAGES", "lab", 12)
-    bx = x
+    # lines by language
+    y = ly + 54
+    p.overline(m, y, "Lines by language")
+    y += 18
+    bx, right = m, W - m
     for i, (lang, v) in enumerate(top):
-        wseg = (right - x) * v / total
-        s.raw(f'<rect x="{bx:.1f}" y="{by:.1f}" width="{max(wseg - 2, 1):.1f}" height="10" rx="2" fill="{LANG[i]}"/>')
+        wseg = (right - m) * v / total
+        p.raw(f'<rect x="{bx:.1f}" y="{y:.1f}" width="{max(wseg - 3, 1):.1f}" height="8" rx="2" fill="{LANG[i]}"/>')
         bx += wseg
-    lx, y = x, by + 36
+    lx, y = m, y + 38
     for i, (lang, v) in enumerate(top):
-        label = f"{lang} {100 * v / total:.1f}%"
-        if lx + len(label) * 7.2 + 15 > right:
-            lx, y = x, y + 22
-        s.raw(f'<rect x="{lx:.1f}" y="{y - 9:.1f}" width="9" height="9" rx="2" fill="{LANG[i]}"/>')
-        s.text(lx + 15, y, label, "t", 12)
-        lx += len(label) * 7.2 + 36
-    note = (f"Counted from git history on {end:%d %b %Y}: commits by me on every branch; lines added in "
-            "non-merge commits, code files only, without lockfiles, virtualenvs, build output or test data.")
-    y = s.para(x, y + 34, note, "m", 10.5, 64 if narrow else 108, 16)
-    s.h = y + 10
-    s.save(name("stats", narrow))
+        label = f"{lang}"
+        pct = f"{100 * v / total:.1f}%"
+        wl = 16 + width(label, "sans", 13) + 6 + width(pct, "mono", 12)
+        if lx + wl > right:
+            lx, y = m, y + 24
+        p.raw(f'<rect x="{lx:.1f}" y="{y - 9:.1f}" width="9" height="9" rx="2" fill="{LANG[i]}" stroke="{LINE2 if i >= 5 else LANG[i]}"/>')
+        p.text(lx + 16, y, label, "sans", 13, SOFT)
+        p.text(lx + 16 + width(label, "sans", 13) + 6, y, pct, "mono", 12, MUTED)
+        lx += wl + 26
+    note = (f"Counted from git history on {end:%d %B %Y}: my commits on every branch, merges included; lines "
+            "added in my non-merge commits, code files only, without lockfiles, virtual environments, build "
+            "output, generated API types or test data.")
+    y = p.para(m, y + 40, note, W - 2 * m, size=12, fill=MUTED, lead=1.55)
+    p.h = y + 12
+    p.save(fname("numbers", narrow))
 
 
-# -------------------------------------------------------------- EquityLens
+# --------------------------------------------------------------------- stack
 
-def equitylens(narrow=False):
-    repo = next(r for r in STATS["repos"] if r["repo"] == "COS301-SE-2026/Equity-Lens")
+STACK = [("Languages", ["Python", "TypeScript", "Go", "Java", "C++", "SQL", "Prolog"]),
+         ("Frontend", ["React", "Next.js", "Angular", "Vite", "Tailwind CSS"]),
+         ("Backend", ["FastAPI", "Node.js", "Express", "NestJS", "SQLAlchemy", "Alembic", "Pydantic"]),
+         ("Data", ["PostgreSQL", "pgvector", "Supabase", "pandas", "NumPy"]),
+         ("Cloud", ["AWS", "Azure", "Docker", "Terraform", "GitHub Actions"]),
+         ("Testing", ["pytest", "Vitest", "Playwright"])]
+
+
+def stack(narrow=False):
     W = 480 if narrow else 960
-    s = Svg(W, "EquityLens, our COS 301 capstone with Amazon Web Services as industry client: portfolio "
-               "analytics for South African retail investors. Screenshot of the dashboard's performance against "
-               "the benchmark, where each dot is a day a holding moved unusually far.")
-    m = 24 if narrow else 52
-    labels = ("COS 301 capstone", "client: Amazon Web Services", "team of 4, The Big Five", "live at equitylens.co.za")
+    m = 28 if narrow else 56
+    p = Panel(W, "Stack. " + ". ".join(f"{k}: {', '.join(v)}" for k, v in STACK) + ".")
+    p.overline(m, 52 if narrow else 60, "Stack")
     if narrow:
-        s.text(m, 44, "EXAMPLES", "lab", 11)
-        s.text(m - 2, 90, "EquityLens", "h", 34)
-        y = s.para(m, 120, "See why your portfolio moved, not just that it did.", "t", 15, 46, 22)
-        s.spans(m, y + 4, [(f"{repo['commits']} commits", "a"), (f"  {repo['added']:,} lines", "m")], 13)
-        fy = chips(s, m, y + 22, labels, 12, W - m) + 18
+        y = 74
+        for key, items in STACK:
+            p.text(m, y + 14, key, "medium", 13.5, WHITE)
+            y = chips(p, m, y + 26, items, W - m, 12.5) + 18
+        p.h = y + 8
     else:
-        s.text(m, 58, "EXAMPLES", "lab", 12)
-        s.text(m - 2, 108, "EquityLens", "h", 40)
-        s.text(m, 140, "See why your portfolio moved, not just that it did.", "t", 16)
-        s.text(W - m, 108, f"{repo['commits']} commits", "a", 14, anchor="end")
-        s.text(W - m, 130, f"{repo['added']:,} lines", "m", 12, anchor="end")
-        fy = chips(s, m, 160, labels, 12.5, W - m) + 24
-
-    shot = (ASSETS / "equitylens-dashboard.webp").read_bytes()
-    fw = W - 2 * m
-    ih = fw * 738 / 1360
-    bar = 26 if narrow else 34
-    s.raw(f'<rect x="{m}" y="{fy}" width="{fw}" height="{ih + bar:.0f}" rx="10" fill="#08070b" stroke="{LINE}"/>')
-    pill = 170 if narrow else 220
-    s.raw(f'<rect x="{m + fw / 2 - pill / 2}" y="{fy + bar / 2 - 9}" width="{pill}" height="18" rx="9" '
-          f'fill="{CARD}" stroke="{LINE}"/>')
-    s.text(m + fw / 2, fy + bar / 2 + 4, "equitylens.co.za" if narrow else "equitylens.co.za/dashboard",
-           "m", 11, anchor="middle")
-    s.raw(f'<clipPath id="shot"><rect x="{m + 1}" y="{fy + bar}" width="{fw - 2}" height="{ih - 1:.0f}" rx="9"/>'
-          f'</clipPath><image clip-path="url(#shot)" x="{m}" y="{fy + bar}" width="{fw}" height="{ih:.1f}" '
-          f'href="data:image/webp;base64,{base64.b64encode(shot).decode()}"/>')
-    cap = ("Each dot is a day one holding moved unusually far for itself. Click it for the event study and "
-           "the news around it.")
-    y = s.para(m, fy + bar + ih + 32, cap, "m", 12, 62 if narrow else 120, 18)
-    s.h = y + 6
-    s.save(name("equitylens", narrow), TOOLS)
-
-
-# ---------------------------------------------------------------- my part
-
-PARTS = [
-    ("Dashboard", "TWR   XIRR via Newton's method",
-     "The flagship page: returns against a blended benchmark, a 0\u201310 health score and what-if rebalancing."),
-    ("Unusual moves", "\u03bb = 0.94   |z| >= 3",
-     "EWMA volatility scores each day's log return against the holding's own recent volatility."),
-    ("Event study", "OLS \u03b2   CAR \u00b1 1.96\u03c3",
-     "A market model splits each move into a market part and a company part, with a cumulative abnormal "
-     "return band."),
-    ("News pipeline", "BM25 0.5  date 0.3  entity 0.2",
-     "Stored once in Postgres, ranked by a hand-written BM25 index, date proximity and entity match; "
-     "refreshed nightly."),
-    ("Guest mode", "no sign-up   data wiped on exit",
-     "Visitors try the whole product without an account, plus the landing page that sells it."),
-]
-CODE = [
-    [("variance ", "b"), ("= ", "m"), ("LAMBDA ", "a"), ("* ", "m"), ("variance", "b")],
-    [("  + ", "m"), ("(", "m"), ("1 ", "d"), ("- ", "m"), ("LAMBDA", "a"), (") * ", "m"), ("r_prev", "b"),
-     ("**", "m"), ("2", "d")],
-    [("sigma ", "b"), ("= ", "m"), ("math.sqrt", "a"), ("(variance)", "b")],
-    [("z ", "b"), ("= ", "m"), ("r ", "b"), ("/ ", "m"), ("sigma", "b")],
-    [("# unusual when |z| >= 3", "m")],
-]
-STACK = "React  FastAPI  PostgreSQL 16  Docker  GitHub Actions  Terraform  AWS"
-
-
-def part_card(s, x, y, w, title, tag, desc, wrap, size, h=None):
-    lines = textwrap.wrap(desc, wrap)
-    h = h or 74 + len(lines) * size * 1.5
-    s.raw(f'<rect x="{x}" y="{y}" width="{w}" height="{h:.0f}" rx="10" fill="{CARD}" stroke="{LINE}"/>')
-    s.raw(f'<rect x="{x}" y="{y + 18}" width="3" height="22" rx="1.5" fill="{JAC}"/>')
-    s.text(x + 18, y + 35, title, "h", 17)
-    s.text(x + 18, y + 58, tag, "a", 11.5)
-    for k, line in enumerate(lines):
-        s.text(x + 18, y + 86 + k * size * 1.5, line, "t", size)
-    return h
-
-
-def code_card(s, x, y, w, h):
-    s.raw(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="10" fill="#08070b" stroke="{LINE}"/>')
-    s.text(x + 18, y + 30, "event_detection.py", "b", 12.5)
-    s.text(x + w - 16, y + 30, "simplified", "m", 10.5, anchor="end")
-    for k, parts in enumerate(CODE):
-        s.spans(x + 18, y + 62 + k * 20, parts, 12)
-
-
-def owned(narrow=False):
-    W = 480 if narrow else 960
-    s = Svg(W, "The parts of EquityLens I own: " + "; ".join(f"{t} ({g}): {d}" for t, g, d in PARTS))
-    if narrow:
-        m = 24
-        s.text(m, 44, "MY PART", "lab", 11)
-        s.text(m, 68, STACK.replace("  ", " \u00b7 ", 3).replace("  ", " "), "m", 10.5)
         y = 88
-        for title, tag, desc in PARTS:
-            y += part_card(s, m, y, W - 2 * m, title, tag, desc, 44, 14) + 14
-        code_card(s, m, y, W - 2 * m, 166)
-        s.h = y + 166 + 24
-    else:
-        m, cw, gap, card_h = 52, 272, 20, 168
-        s.text(m, 58, "MY PART", "lab", 12)
-        s.text(W - m, 58, STACK, "m", 11.5, anchor="end")
-        for i, (title, tag, desc) in enumerate(PARTS):
-            x, y = m + (i % 3) * (cw + gap), 82 + (i // 3) * (card_h + gap)
-            part_card(s, x, y, cw, title, tag, desc, 32, 12.5, card_h)
-        code_card(s, m + 2 * (cw + gap), 82 + card_h + gap, cw, card_h)
-        s.h = 82 + 2 * card_h + gap + 34
-    s.save(name("owned", narrow))
+        for key, items in STACK:
+            p.text(m, y + 20, key, "medium", 14, WHITE)
+            yb = chips(p, 216, y, items, W - m, 13)
+            y = yb + 12
+        p.h = y + 30
+    p.save(fname("stack", narrow))
 
 
-# ---------------------------------------------------------- project cards
-
-PROJECTS = [
-    ("card-spl", "SPL compiler", "COS 341 \u00b7 Java \u00b7 group of four",
-     "A compiler for SPL, the course's teaching language, built stage by stage. I worked on the parser and "
-     "the semantic analysis.", "Josh-Heath123/COS341_SPL", "{;}"),
-    ("card-culprit", "Culprit", "personal \u00b7 Python, Go \u00b7 in progress",
-     "A multimeter for software: probes the links between components to find what is wrong, where and why, "
-     "with the evidence attached.", "Josh-Heath123/Culprit", "-o-"),
-    ("card-nursery", "Plant nursery simulator", "COS 214 \u00b7 C++ \u00b7 team project",
-     "A nursery simulation built to show object-oriented design patterns. I built the GUI and the Iterator "
-     "pattern.", "Abdulrahman-Sabah/COS214_Final_Project", "\\|/"),
-    ("card-market", "Stationery marketplace", "COS 221 \u00b7 PHP, JavaScript \u00b7 team",
-     "Pulls product data from several retailers' APIs into one store. I wrote the PHP API layer and the "
-     "products page.", "Josua-Louw/COS221-Assignment5", "[$]"),
-]
-
-
-def project_card(file, title, meta, desc, repo, motif, narrow=False, lines=0, meta_lines=1, side=1):
-    commits = next(r["commits"] for r in STATS["repos"] if r["repo"] == repo)
-    private = repo in PRIVATE
-    if narrow:
-        W, m, wrap, size = 240, 16, 25, 13
-    else:
-        W, m, wrap, size = 470, 28, 45, 14.5
-    s = Svg(W, f"{title}. {meta}. {desc} {commits} commits.", gutter=side * (6 if narrow else 9))
-    if narrow:
-        y = s.para(m, 36, title, "h", 14.5, 24, 20)
-        y0 = y + 2
-        y = max(s.para(m, y0, meta, "a", 11, 32, 16), y0 + meta_lines * 16) + 14
-    else:
-        s.text(W - m, 66, motif, "d", 40, anchor="end", style="opacity:.35")
-        s.text(m, 50, title, "h", 22)
-        s.text(m, 76, meta, "a", 13)
-        y = 112
-    y0 = y
-    y = s.para(m, y, desc, "t", size, wrap, size * 1.5)
-    y = max(y, y0 + lines * size * 1.5)   # pad so cards in a row line up
-    rule = y + 4
-    s.raw(f'<line x1="{m}" y1="{rule:.0f}" x2="{W - m}" y2="{rule:.0f}" stroke="{LINE}"/>')
-    fs = 11.5 if narrow else 12.5
-    s.text(m, rule + 24, f"{commits} commits", "m", fs)
-    if private:
-        s.text(W - m, rule + 24, "private" if narrow else "private repo", "m", fs, anchor="end")
-    else:
-        s.text(W - m - 14, rule + 24, "source", "b", fs, anchor="end")
-        s.raw(arrow(W - m - 8, rule + 15))
-    s.h = rule + 42
-    s.save(name(file, narrow))
-
-
-def projects(narrow=False):
-    # Every card gets the same number of description lines, so rows line up.
-    wrap = 25 if narrow else 45
-    lines = max(len(textwrap.wrap(p[3], wrap)) for p in PROJECTS)
-    meta_lines = max(len(textwrap.wrap(p[2], 32)) for p in PROJECTS)
-    for i, (f, title, meta, desc, repo, motif) in enumerate(PROJECTS):
-        side = 1 if i % 2 == 0 else -1          # left column pads right, right column pads left
-        project_card(f, title, meta, desc, repo, motif, narrow, lines, meta_lines, side)
-
-
-# ------------------------------------------------------------ environment
-
-ENV = [("languages", ["Java", "Python", "TypeScript", "C++", "SQL", "Prolog"]),
-       ("frontend", ["React", "Next.js", "Angular", "Vite", "Tailwind CSS"]),
-       ("backend", ["FastAPI", "Node.js", "Express", "NestJS", "SQLAlchemy", "Alembic"]),
-       ("data", ["PostgreSQL", "Supabase", "pandas", "NumPy"]),
-       ("cloud", ["AWS", "Azure", "Docker", "GitHub Actions"])]
-
-
-def environment(narrow=False):
-    W = 480 if narrow else 960
-    s = Svg(W, "ENVIRONMENT. " + ". ".join(f"{k.title()}: {', '.join(v)}" for k, v in ENV) + ".")
-    if narrow:
-        m = 24
-        s.text(m, 44, "ENVIRONMENT", "lab", 11)
-        y = 64
-        for key, items in ENV:
-            s.text(m, y + 14, key, "m", 12)
-            y = chips(s, m, y + 24, items, 13, W - m) + 18
-        s.h = y + 6
-    else:
-        s.text(52, 58, "ENVIRONMENT", "lab", 12)
-        y = 84
-        for key, items in ENV:
-            s.text(52, y + 18, key, "m", 12.5)
-            chips(s, 214, y, items, 13, W - 52)
-            y += 42
-        s.h = y + 18
-    s.save(name("stack", narrow))
-
-
-# ------------------------------------------------------- footer, buttons
+# -------------------------------------------------------------------- footer
 
 def footer(narrow=False):
     W = 480 if narrow else 960
-    s = Svg(W, "Josh-Heath123, University of Pretoria, October 2026, JOSH(1)")
-    s.h = 56
-    s.text(24 if narrow else 32, 34, "Josh-Heath123", "m", 12)
+    end = dt.date.fromisoformat(STATS["generated"])
+    p = Panel(W, f"Joshua Heath. Updated {end:%B %Y}.")
+    m = 28 if narrow else 40
+    p.h = 64
+    p.text(m, 38, "Joshua Heath", "medium", 13, SOFT)
+    p.text(W - m, 38, f"Updated {end:%B %Y}", "mono", 11.5, MUTED, anchor="end")
     if not narrow:
-        s.text(W / 2, 34, "University of Pretoria \u00b7 October 2026", "m", 12, anchor="middle")
-    s.text(W - (24 if narrow else 32), 34, "JOSH(1)", "m", 12, anchor="end")
-    s.save(name("footer", narrow))
+        p.text(W / 2, 38, "University of Pretoria  ·  Gauteng, South Africa", "mono", 11.5, MUTED, anchor="middle")
+    p.save(fname("footer", narrow))
 
 
-def button(file, label, glyph, external=True):
+# ------------------------------------------------------------------- buttons
+
+def button(file, label, mark=None, external=True):
     size = 14
-    w = int(len(glyph + "  " + label) * size * 0.6 + 32 + (22 if external else 0))
-    s = Svg(w, label, panel=False)
-    s.h = 40
-    s.raw(f'<rect x=".5" y=".5" width="{w - 1}" height="39" rx="9" fill="{INK}" stroke="#3b3452"/>')
-    s.raw(f'<rect x="1.5" y="36" width="{w - 3}" height="3" rx="1.5" fill="#1b1826"/>')
-    s.spans(16, 25, [(glyph + "  ", "a"), (label, "b")], size)
+    h = 44
+    tw = width(label, "medium", size)
+    mw = width(mark, "mono", 13) + 10 if mark else 0
+    w = round(tw + mw + 40 + (18 if external else 0))
+    p = Panel(w, label, card=False)
+    p.h = h
+    p.raw(f'<rect x=".5" y=".5" width="{w - 1}" height="{h - 1}" rx="{h / 2 - .5}" fill="{BG}" stroke="{LINE2}"/>')
+    x = 20
+    if mark:
+        p.text(x, h / 2 + 4.5, mark, "mono", 13, LABEL)
+        x += mw
+    p.text(x, h / 2 + 5, label, "medium", size, WHITE)
     if external:
-        s.raw(arrow(w - 25, 16, MUTED))
-    s.save(file)
+        p.arrow(x + tw + 9, h / 2 - 3.5, LABEL)
+    p.save(file)
 
 
 if __name__ == "__main__":
     for narrow in (False, True):
         about(narrow)
-        history(narrow)
         equitylens(narrow)
         owned(narrow)
         projects(narrow)
-        environment(narrow)
+        coursework(narrow)
+        numbers(narrow)
+        stack(narrow)
         footer(narrow)
     button("btn-linkedin.svg", "LinkedIn", "in")
     button("btn-email.svg", "joshuaheath004@gmail.com", "@", external=False)
     button("btn-equitylens.svg", "equitylens.co.za", "~>")
-    button("btn-source.svg", "source on GitHub", "</>")
+    button("btn-source.svg", "Source on GitHub", "</>")

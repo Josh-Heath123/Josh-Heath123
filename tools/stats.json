@@ -1,10 +1,10 @@
 {
- "generated": "2026-10-29",
+ "generated": "2026-11-18",
  "totals": {
-  "repos": 7,
-  "commits": 582,
-  "added": 137246,
-  "deleted": 22663
+  "repos": 9,
+  "commits": 1236,
+  "added": 351791,
+  "deleted": 50377
  },
  "repos": [
   {
@@ -15,12 +15,30 @@
   },
   {
    "repo": "Josh-Heath123/Culprit",
-   "commits": 70,
-   "added": 58038,
-   "deleted": 2225
+   "commits": 285,
+   "added": 126918,
+   "deleted": 10341
   },
   {
-   "repo": "Josua-Louw/COS221-Assignment5",
+   "repo": "Josh-Heath123/StudySensei",
+   "commits": 208,
+   "added": 53310,
+   "deleted": 14896
+  },
+  {
+   "repo": "Josh-Heath123/StyleCode",
+   "commits": 168,
+   "added": 81455,
+   "deleted": 4323
+  },
+  {
+   "repo": "Josh-Heath123/MuniSense",
+   "commits": 63,
+   "added": 10900,
+   "deleted": 379
+  },
+  {
+   "repo": "Josh-Heath123/COS221-Assignment5",
    "commits": 53,
    "added": 5133,
    "deleted": 1402
@@ -32,39 +50,33 @@
    "deleted": 1593
   },
   {
-   "repo": "Abdulrahman-Sabah/COS214_Final_Project",
+   "repo": "Josh-Heath123/COS214-Final_Project",
    "commits": 17,
    "added": 4215,
    "deleted": 1544
   },
   {
    "repo": "Josh-Heath123/Josh-Heath123",
-   "commits": 6,
-   "added": 0,
-   "deleted": 0
-  },
-  {
-   "repo": "Josh-Heath123/StyleCode",
-   "commits": 1,
+   "commits": 7,
    "added": 0,
    "deleted": 0
   }
  ],
  "languages": {
-  "Python": 58553,
-  "JavaScript": 39146,
-  "Go": 14959,
+  "Python": 124042,
+  "TypeScript": 100125,
+  "Go": 56528,
+  "JavaScript": 40477,
+  "CSS": 7352,
+  "YAML": 5867,
   "Java": 5491,
-  "TypeScript": 3740,
   "PHP": 3660,
-  "YAML": 2754,
-  "CSS": 1876,
-  "Shell": 1681,
-  "HTML": 1605,
+  "Shell": 2101,
+  "HTML": 1884,
   "C++": 1601,
+  "Config": 1404,
   "Terraform": 1223,
-  "Config": 924,
-  "SQL": 33
+  "SQL": 36
  },
  "days": {
   "2025-05-19": 10,
@@ -80,6 +92,11 @@
   "2025-10-31": 2,
   "2025-11-02": 4,
   "2025-11-03": 3,
+  "2026-01-19": 3,
+  "2026-01-22": 1,
+  "2026-01-23": 1,
+  "2026-01-25": 1,
+  "2026-01-26": 1,
   "2026-02-17": 1,
   "2026-04-07": 3,
   "2026-04-13": 1,
@@ -180,6 +197,17 @@
   "2026-10-24": 4,
   "2026-10-25": 3,
   "2026-10-26": 2,
-  "2026-10-29": 1
+  "2026-10-29": 2,
+  "2026-11-03": 12,
+  "2026-11-04": 53,
+  "2026-11-05": 16,
+  "2026-11-06": 21,
+  "2026-11-10": 55,
+  "2026-11-11": 41,
+  "2026-11-12": 76,
+  "2026-11-13": 100,
+  "2026-11-14": 12,
+  "2026-11-17": 168,
+  "2026-11-18": 92
  }
 }

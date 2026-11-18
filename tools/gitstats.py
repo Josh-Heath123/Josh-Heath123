@@ -7,7 +7,8 @@ gitstats.py - count one author's commits and lines of code across local clones.
 Commits: every commit the author made, on every branch, merges included.
 Lines:   lines added in the author's non-merge commits, counting code files
          only. Lockfiles, virtual environments, site-packages, build output,
-         minified files, source maps and test data are skipped, as are
+         minified files, source maps, generated API types and test
+         data are skipped, as are
          commits titled "Merge ..." (they carry other people's work).
 """
 
@@ -33,6 +34,7 @@ CODE = {
 SKIP = re.compile(
     r"(^|/)(node_modules|dist|build|vendor|coverage|\.?venv[^/]*|site-packages|__pycache__|testdata)/"
     r"|\.min\.(js|css)$|\.map$|(-lock\.(json|yaml)|\.lock)$"
+    r"|(^|/)schema\.d\.ts$"  # TypeScript types generated from an OpenAPI schema
 )
 
 
